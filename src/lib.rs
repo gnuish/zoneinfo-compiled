@@ -5,7 +5,7 @@
 //! This is a library for parsing compiled zoneinfo files.
 
 use std::borrow::Cow;
-use std::convert::AsRef;
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,24 +18,19 @@ pub mod parser;
 pub use parser::Result;
 
 pub trait CompiledData {
-    fn parse(input: Vec<u8>) -> Result<TimeZone>;
+    fn parse<R: Read>(input: &mut R) -> Result<TimeZone>;
 
     fn from_file<P: AsRef<Path>>(path: P) -> Result<TimeZone> {
-        use std::io::{Read, BufReader};
         use std::fs::File;
 
-        let f = File::open(path)?;
-        let mut r = BufReader::new(f);
-        let mut contents: Vec<u8> = Vec::new();
-
-        r.read_to_end(&mut contents)?;
-        let tz = Self::parse(contents)?;
+        let mut f = File::open(path.as_ref())?;
+        let tz = Self::parse(&mut f)?;
         Ok(tz)
     }
 }
 
 impl CompiledData for TimeZone {
-    fn parse(input: Vec<u8>) -> Result<TimeZone> {
+    fn parse<R: Read>(input: &mut R) -> Result<TimeZone> {
         let data = parse(input)?;
         let arc = Arc::new(data.time_zone);
         let tz = TimeZone(TimeZoneSource::Runtime(arc));
@@ -105,7 +100,7 @@ impl LocalTimeType {
 
 
 /// Parses a series of bytes into a timezone data structure.
-pub fn parse(input: Vec<u8>) -> Result<TZData> {
+pub fn parse<R: Read>(input: R) -> Result<TZData> {
     let tz = parser::parse(input, parser::Limits::sensible())?;
     cook(tz)
 }

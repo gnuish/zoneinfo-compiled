@@ -2,7 +2,6 @@ extern crate zoneinfo_compiled;
 
 use std::env;
 use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 
 
@@ -14,9 +13,7 @@ fn main() {
     for arg in env::args().skip(1) {
         match File::open(&Path::new(&arg)) {
             Ok(mut file) => {
-                let mut contents = Vec::new();
-                file.read_to_end(&mut contents).unwrap();
-                match zoneinfo_compiled::parse(contents) {
+                match zoneinfo_compiled::parse(file) {
                     Ok(tzdata) => println!("{:#?}", tzdata),
                     Err(e)     => println!("Error: {}", e),
                 }

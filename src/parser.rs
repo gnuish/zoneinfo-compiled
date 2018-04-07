@@ -13,7 +13,7 @@ use byteorder::{ReadBytesExt, BigEndian};
 
 use std::error;
 use std::fmt;
-use std::io::{Cursor, Read};
+use std::io::Read;
 use std::result;
 
 
@@ -172,20 +172,20 @@ impl Limits {
 }
 
 
-struct Parser {
-    cursor: Cursor<Vec<u8>>,
+struct Parser<R> {
+    data: R,
 }
 
-impl Parser {
-    fn new(buf: Vec<u8>) -> Parser {
+impl<R: Read> Parser<R> {
+    fn new(data: R) -> Parser<R> {
         Parser {
-            cursor: Cursor::new(buf),
+            data
         }
     }
 
     fn read_magic_number(&mut self) -> Result<()> {
         let mut magic = [0u8; 4];
-        self.cursor.read(&mut magic)?;
+        self.data.read(&mut magic)?;
         if magic == *b"TZif" {
             Ok(())
         }
@@ -196,31 +196,31 @@ impl Parser {
 
     fn skip_initial_zeroes(&mut self) -> Result<()> {
         let mut magic = [0u8; 15];
-        self.cursor.read(&mut magic)?;
+        self.data.read(&mut magic)?;
         Ok(())
     }
 
     fn read_header(&mut self) -> Result<Header> {
         Ok(Header {
-            version:               self.cursor.read_u8()?,
-            num_gmt_flags:         self.cursor.read_u32::<BigEndian>()?,
-            num_standard_flags:    self.cursor.read_u32::<BigEndian>()?,
-            num_leap_seconds:      self.cursor.read_u32::<BigEndian>()?,
-            num_transitions:       self.cursor.read_u32::<BigEndian>()?,
-            num_local_time_types:  self.cursor.read_u32::<BigEndian>()?,
-            num_abbr_chars:        self.cursor.read_u32::<BigEndian>()?,
+            version:               self.data.read_u8()?,
+            num_gmt_flags:         self.data.read_u32::<BigEndian>()?,
+            num_standard_flags:    self.data.read_u32::<BigEndian>()?,
+            num_leap_seconds:      self.data.read_u32::<BigEndian>()?,
+            num_transitions:       self.data.read_u32::<BigEndian>()?,
+            num_local_time_types:  self.data.read_u32::<BigEndian>()?,
+            num_abbr_chars:        self.data.read_u32::<BigEndian>()?,
         })
     }
 
     fn read_transition_data(&mut self, count: usize) -> Result<Vec<TransitionData>> {
         let mut times = Vec::with_capacity(count);
         for _ in 0 .. count {
-            times.push(self.cursor.read_i32::<BigEndian>()?);
+            times.push(self.data.read_i32::<BigEndian>()?);
         }
 
         let mut types = Vec::with_capacity(count);
         for _ in 0 .. count {
-            types.push(self.cursor.read_u8()?);
+            types.push(self.data.read_u8()?);
         }
 
         Ok(times.iter().zip(types.iter()).map(|(&ti, &ty)| {
@@ -234,7 +234,7 @@ impl Parser {
     fn read_octets(&mut self, count: usize) -> Result<Vec<u8>> {
         let mut buf = Vec::with_capacity(count);
         for _ in 0 .. count {
-            buf.push(self.cursor.read_u8()?);
+            buf.push(self.data.read_u8()?);
         }
         Ok(buf)
     }
@@ -243,9 +243,9 @@ impl Parser {
         let mut buf = Vec::with_capacity(count);
         for _ in 0 .. count {
             buf.push(LocalTimeTypeData {
-                offset:  self.cursor.read_i32::<BigEndian>()?,
-                is_dst:  self.cursor.read_u8()?,
-                name_offset: self.cursor.read_u8()?,
+                offset:  self.data.read_i32::<BigEndian>()?,
+                is_dst:  self.data.read_u8()?,
+                name_offset: self.data.read_u8()?,
             });
         }
         Ok(buf)
@@ -255,8 +255,8 @@ impl Parser {
         let mut buf = Vec::with_capacity(count);
         for _ in 0 .. count {
             buf.push(LeapSecondData {
-                timestamp:          self.cursor.read_i32::<BigEndian>()?,
-                leap_second_count:  self.cursor.read_i32::<BigEndian>()?,
+                timestamp:          self.data.read_i32::<BigEndian>()?,
+                leap_second_count:  self.data.read_i32::<BigEndian>()?,
             });
         }
         Ok(buf)
@@ -364,7 +364,7 @@ pub struct TZData {
 
 /// Parse a series of bytes into a `TZData` structure, returning an error if
 /// the buffer fails to be read from, or a limit is reached.
-pub fn parse(buf: Vec<u8>, limits: Limits) -> Result<TZData> {
+pub fn parse<R: Read>(buf: R, limits: Limits) -> Result<TZData> {
     let mut parser = Parser::new(buf);
     parser.read_magic_number()?;
     parser.skip_initial_zeroes()?;
@@ -394,6 +394,7 @@ pub fn parse(buf: Vec<u8>, limits: Limits) -> Result<TZData> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn est() {
@@ -407,7 +408,7 @@ mod test {
             0x00, 0x00, 0x45, 0x53, 0x54, 0x00, 0x00, 0x00,
         ];
 
-        let data = parse(bytes, Limits::sensible()).unwrap();
+        let data = parse(Cursor::new(bytes), Limits::sensible()).unwrap();
         assert_eq!(data.header.num_transitions, 0);
         assert_eq!(data.header.num_leap_seconds, 0);
         assert_eq!(data.header.num_local_time_types, 1);
@@ -434,7 +435,7 @@ mod test {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
 
-        let data = parse(bytes, Limits::sensible()).unwrap();
+        let data = parse(Cursor::new(bytes), Limits::sensible()).unwrap();
         assert_eq!(data.header.num_transitions, 9);
         assert_eq!(data.header.num_leap_seconds, 0);
         assert_eq!(data.header.num_local_time_types, 3);
