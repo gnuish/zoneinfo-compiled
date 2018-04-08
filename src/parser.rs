@@ -9,11 +9,11 @@
 //! For more information on what these values mean, see
 //! [man 5 tzfile](ftp://ftp.iana.org/tz/code/tzfile.5.txt).
 
-use byteorder::{ReadBytesExt, BigEndian};
+use byteorder::{ByteOrder, BigEndian};
 
 use std::error;
 use std::fmt;
-use std::io::Read;
+use std::io::{self, Read};
 use std::result;
 
 
@@ -183,83 +183,80 @@ impl<R: Read> Parser<R> {
         }
     }
 
-    fn read_magic_number(&mut self) -> Result<()> {
-        let mut magic = [0u8; 4];
-        self.data.read(&mut magic)?;
-        if magic == *b"TZif" {
-            Ok(())
-        }
-        else {
-            Err(Box::new(Error::InvalidMagicNumber))
-        }
-    }
-
-    fn skip_initial_zeroes(&mut self) -> Result<()> {
-        let mut magic = [0u8; 15];
-        self.data.read(&mut magic)?;
-        Ok(())
-    }
-
     fn read_header(&mut self) -> Result<Header> {
+        let mut buf = [0u8; 44];
+
+        // Check if it's a tzfile and the whole header was read
+        match self.data.read(&mut buf) {
+            Ok(_) if &buf[0..4] != b"TZif" => return Err(Box::new(Error::InvalidMagicNumber)),
+            Ok(n) if buf.len() > n => return Err(Box::new(io::Error::new(
+                        io::ErrorKind::UnexpectedEof, "early eof"))),
+            Err(e) => return Err(Box::new(e)),
+            _ => ()
+        }
+
+        let version = buf[4];
+
+        // Bytes within 4..20 are reserved space
+
         Ok(Header {
-            version:               self.data.read_u8()?,
-            num_gmt_flags:         self.data.read_u32::<BigEndian>()?,
-            num_standard_flags:    self.data.read_u32::<BigEndian>()?,
-            num_leap_seconds:      self.data.read_u32::<BigEndian>()?,
-            num_transitions:       self.data.read_u32::<BigEndian>()?,
-            num_local_time_types:  self.data.read_u32::<BigEndian>()?,
-            num_abbr_chars:        self.data.read_u32::<BigEndian>()?,
+            version,
+            num_gmt_flags:         BigEndian::read_u32(&buf[20..24]),
+            num_standard_flags:    BigEndian::read_u32(&buf[24..28]),
+            num_leap_seconds:      BigEndian::read_u32(&buf[28..32]),
+            num_transitions:       BigEndian::read_u32(&buf[32..36]),
+            num_local_time_types:  BigEndian::read_u32(&buf[36..40]),
+            num_abbr_chars:        BigEndian::read_u32(&buf[40..44]),
         })
     }
 
     fn read_transition_data(&mut self, count: usize) -> Result<Vec<TransitionData>> {
-        let mut times = Vec::with_capacity(count);
-        for _ in 0 .. count {
-            times.push(self.data.read_i32::<BigEndian>()?);
-        }
+        let mut buf = vec![0u8; count * 5];
+        self.data.read_exact(&mut buf)?;
 
-        let mut types = Vec::with_capacity(count);
-        for _ in 0 .. count {
-            types.push(self.data.read_u8()?);
-        }
+        let times = &buf[0 .. count * 4];
+        let types = &buf[count * 4 ..];
 
-        Ok(times.iter().zip(types.iter()).map(|(&ti, &ty)| {
-            TransitionData {
-                timestamp: ti,
+        Ok(times
+            .chunks(4)
+            .zip(types.iter())
+            .map(|(ti, &ty)| TransitionData {
+                timestamp: BigEndian::read_i32(ti),
                 local_time_type_index: ty,
-            }
-        }).collect())
+            }).collect())
      }
 
     fn read_octets(&mut self, count: usize) -> Result<Vec<u8>> {
-        let mut buf = Vec::with_capacity(count);
-        for _ in 0 .. count {
-            buf.push(self.data.read_u8()?);
-        }
+        let mut buf = vec![0u8; count];
+        self.data.read_exact(&mut buf)?;
         Ok(buf)
     }
 
     fn read_local_time_type_data(&mut self, count: usize) -> Result<Vec<LocalTimeTypeData>> {
-        let mut buf = Vec::with_capacity(count);
-        for _ in 0 .. count {
-            buf.push(LocalTimeTypeData {
-                offset:  self.data.read_i32::<BigEndian>()?,
-                is_dst:  self.data.read_u8()?,
-                name_offset: self.data.read_u8()?,
-            });
-        }
-        Ok(buf)
+        let mut buf = vec![0u8; count * 6];
+        self.data.read_exact(&mut buf)?;
+
+        Ok(buf
+           .chunks(6)
+           .map(|chunk| LocalTimeTypeData {
+                offset: BigEndian::read_i32(&chunk[0..4]),
+                is_dst: chunk[4],
+                name_offset: chunk[5],
+            })
+           .collect())
     }
 
     fn read_leap_second_data(&mut self, count: usize) -> Result<Vec<LeapSecondData>> {
-        let mut buf = Vec::with_capacity(count);
-        for _ in 0 .. count {
-            buf.push(LeapSecondData {
-                timestamp:          self.data.read_i32::<BigEndian>()?,
-                leap_second_count:  self.data.read_i32::<BigEndian>()?,
-            });
-        }
-        Ok(buf)
+        let mut buf = vec![0u8; count * 8];
+        self.data.read_exact(&mut buf)?;
+
+        Ok(buf
+           .chunks(8)
+           .map(|chunk| LeapSecondData {
+                timestamp:          BigEndian::read_i32(&chunk[0..4]),
+                leap_second_count:  BigEndian::read_i32(&chunk[4..8]),
+            })
+           .collect())
     }
 }
 
@@ -366,8 +363,6 @@ pub struct TZData {
 /// the buffer fails to be read from, or a limit is reached.
 pub fn parse<R: Read>(buf: R, limits: Limits) -> Result<TZData> {
     let mut parser = Parser::new(buf);
-    parser.read_magic_number()?;
-    parser.skip_initial_zeroes()?;
 
     let header = parser.read_header()?;
     limits.verify(&header)?;
