@@ -13,7 +13,7 @@ use byteorder::{ByteOrder, BigEndian};
 
 use std::error;
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::result;
 
 
@@ -53,7 +53,7 @@ pub struct Header {
 pub struct TransitionData {
 
     /// The time at which the rules for computing local time change.
-    pub timestamp: i32,
+    pub timestamp: i64,
 
     /// Index into the local time types array for this transition.
     pub local_time_type_index: u8,
@@ -82,7 +82,7 @@ pub struct LocalTimeTypeData {
 pub struct LeapSecondData {
 
     /// The time, as a number of seconds, at which a leap second occurs.
-    pub timestamp: i32,
+    pub timestamp: i64,
 
     /// Number of leap seconds to be added.
     pub leap_second_count: i32,
@@ -172,11 +172,11 @@ impl Limits {
 }
 
 
-struct Parser<R> {
+struct Parser<R: Read + Seek> {
     data: R,
 }
 
-impl<R: Read> Parser<R> {
+impl<R: Read + Seek> Parser<R> {
     fn new(data: R) -> Parser<R> {
         Parser {
             data
@@ -210,7 +210,7 @@ impl<R: Read> Parser<R> {
         })
     }
 
-    fn read_transition_data(&mut self, count: usize) -> Result<Vec<TransitionData>> {
+    fn read_transition_data_32(&mut self, count: usize) -> Result<Vec<TransitionData>> {
         let mut buf = vec![0u8; count * 5];
         self.data.read_exact(&mut buf)?;
 
@@ -221,7 +221,23 @@ impl<R: Read> Parser<R> {
             .chunks(4)
             .zip(types.iter())
             .map(|(ti, &ty)| TransitionData {
-                timestamp: BigEndian::read_i32(ti),
+                timestamp: BigEndian::read_i32(ti) as i64,
+                local_time_type_index: ty,
+            }).collect())
+     }
+
+    fn read_transition_data_64(&mut self, count: usize) -> Result<Vec<TransitionData>> {
+        let mut buf = vec![0u8; count * 9];
+        self.data.read_exact(&mut buf)?;
+
+        let times = &buf[0 .. count * 8];
+        let types = &buf[count * 8 ..];
+
+        Ok(times
+            .chunks(8)
+            .zip(types.iter())
+            .map(|(ti, &ty)| TransitionData {
+                timestamp: BigEndian::read_i64(ti),
                 local_time_type_index: ty,
             }).collect())
      }
@@ -246,15 +262,28 @@ impl<R: Read> Parser<R> {
            .collect())
     }
 
-    fn read_leap_second_data(&mut self, count: usize) -> Result<Vec<LeapSecondData>> {
+    fn read_leap_second_data_32(&mut self, count: usize) -> Result<Vec<LeapSecondData>> {
         let mut buf = vec![0u8; count * 8];
         self.data.read_exact(&mut buf)?;
 
         Ok(buf
            .chunks(8)
            .map(|chunk| LeapSecondData {
-                timestamp:          BigEndian::read_i32(&chunk[0..4]),
+                timestamp:          BigEndian::read_i32(&chunk[0..4]) as i64,
                 leap_second_count:  BigEndian::read_i32(&chunk[4..8]),
+            })
+           .collect())
+    }
+
+    fn read_leap_second_data_64(&mut self, count: usize) -> Result<Vec<LeapSecondData>> {
+        let mut buf = vec![0u8; count * 12];
+        self.data.read_exact(&mut buf)?;
+
+        Ok(buf
+           .chunks(12)
+           .map(|chunk| LeapSecondData {
+                timestamp:          BigEndian::read_i64(&chunk[0..8]),
+                leap_second_count:  BigEndian::read_i32(&chunk[8..12]),
             })
            .collect())
     }
@@ -361,28 +390,50 @@ pub struct TZData {
 
 /// Parse a series of bytes into a `TZData` structure, returning an error if
 /// the buffer fails to be read from, or a limit is reached.
-pub fn parse<R: Read>(buf: R, limits: Limits) -> Result<TZData> {
+pub fn parse<R: Read + Seek>(buf: R, limits: Limits) -> Result<TZData> {
     let mut parser = Parser::new(buf);
 
     let header = parser.read_header()?;
-    limits.verify(&header)?;
 
-    let transitions    = parser.read_transition_data(header.num_transitions as usize)?;
-    let time_info      = parser.read_local_time_type_data(header.num_local_time_types as usize)?;
-    let strings        = parser.read_octets(header.num_abbr_chars as usize)?;
-    let leap_seconds   = parser.read_leap_second_data(header.num_leap_seconds as usize)?;
-    let standard_flags = parser.read_octets(header.num_standard_flags as usize)?;
-    let gmt_flags      = parser.read_octets(header.num_gmt_flags as usize)?;
+    let tzdata = match header.version {
+        // Version 1
+        0x00 => {
+            limits.verify(&header)?;
 
-    Ok(TZData {
-        header,
-        transitions,
-        time_info,
-        leap_seconds,
-        strings,
-        standard_flags,
-        gmt_flags,
-    })
+            TZData {
+                header: header.clone(),
+                transitions: parser.read_transition_data_32(header.num_transitions as usize)?,
+                time_info: parser.read_local_time_type_data(header.num_local_time_types as usize)?,
+                strings: parser.read_octets(header.num_abbr_chars as usize)?,
+                leap_seconds: parser.read_leap_second_data_32(header.num_leap_seconds as usize)?,
+                standard_flags: parser.read_octets(header.num_standard_flags as usize)?,
+                gmt_flags: parser.read_octets(header.num_gmt_flags as usize)?,
+            }
+        },
+        // Version 2, 3, or future version
+        b'2' | b'3' | _ => {
+            let to_skip = header.num_transitions * 5 + header.num_local_time_types * 6
+                + header.num_abbr_chars + header.num_leap_seconds * 8
+                + header.num_standard_flags + header.num_gmt_flags;
+            parser.data.seek(SeekFrom::Current(to_skip as i64))?;
+
+            // Parse the 2nd header
+            let header = parser.read_header()?;
+            limits.verify(&header)?;
+
+            TZData {
+                header: header.clone(),
+                transitions: parser.read_transition_data_64(header.num_transitions as usize)?,
+                time_info: parser.read_local_time_type_data(header.num_local_time_types as usize)?,
+                strings: parser.read_octets(header.num_abbr_chars as usize)?,
+                leap_seconds: parser.read_leap_second_data_64(header.num_leap_seconds as usize)?,
+                standard_flags: parser.read_octets(header.num_standard_flags as usize)?,
+                gmt_flags: parser.read_octets(header.num_gmt_flags as usize)?,
+            }
+        }
+    };
+
+    Ok(tzdata)
 }
 
 

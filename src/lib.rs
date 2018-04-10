@@ -5,7 +5,7 @@
 //! This is a library for parsing compiled zoneinfo files.
 
 use std::borrow::Cow;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ pub mod parser;
 pub use parser::Result;
 
 pub trait CompiledData {
-    fn parse<R: Read>(input: &mut R) -> Result<TimeZone>;
+    fn parse<R: Read + Seek>(input: &mut R) -> Result<TimeZone>;
 
     fn from_file<P: AsRef<Path>>(path: P) -> Result<TimeZone> {
         use std::fs::File;
@@ -30,7 +30,7 @@ pub trait CompiledData {
 }
 
 impl CompiledData for TimeZone {
-    fn parse<R: Read>(input: &mut R) -> Result<TimeZone> {
+    fn parse<R: Read + Seek>(input: &mut R) -> Result<TimeZone> {
         let data = parse(input)?;
         let arc = Arc::new(data.time_zone);
         let tz = TimeZone(TimeZoneSource::Runtime(arc));
@@ -56,7 +56,7 @@ pub struct TZData {
 pub struct LeapSecond {
 
     /// Unix timestamp at which a leap second occurs.
-    pub timestamp: i32,
+    pub timestamp: i64,
 
     /// Number of leap seconds to be added.
     pub leap_second_count: i32,
@@ -100,7 +100,7 @@ impl LocalTimeType {
 
 
 /// Parses a series of bytes into a timezone data structure.
-pub fn parse<R: Read>(input: R) -> Result<TZData> {
+pub fn parse<R: Read + Seek>(input: R) -> Result<TZData> {
     let tz = parser::parse(input, parser::Limits::sensible())?;
     cook(tz)
 }
